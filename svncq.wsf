@@ -1,0 +1,182 @@
+<package>
+<job id="hPreCommit">
+<reference object="WScript.Shell"/>
+<reference object="Scripting.Dictionary"/>
+<script language="VBScript" src="C:\Program Files\IBM\RationalSDLC\ClearQuest\clearquest.bas"/>
+<script language="VBScript">
+'*******************************************************************************
+'* NAME       : svncq.wsf
+'* AUTHOR     : poyrazus
+'* PURPOSE    : Script to check whether the commit is accompanied by a commit
+'*              comment and that the comment contains the valid open ClearQuest
+'*              issue id. The script is passed two parameters namely
+'*
+'*              [1] REPOS-PATH   (the path to this repository)
+'*              [2] TXN-NAME     (the name of the txn about to be committed)
+'*
+'* REVISION HISTORY
+'* 2011.09.22 Created
+'* 2016.07.25 Messages translated to English
+'*******************************************************************************
+
+Option Explicit
+Public Const vbSpace = " "
+Public Const SVNLOOK_PATH = "C:\Program Files\VisualSVN Server\bin\svnlook.exe"
+Public Const CQ_USER_NAME = "username"
+Public Const CQ_USER_PASS = "password"
+Public Const CQ_DB_SET_NAME = "DBSET"
+Public Const CQ_DB_NAME = "PROJECT"
+Public Const CQ_ISSUE_TYPE = "Activity"
+
+Public Const ERROR_2 = "Missing parameter, missing repository path or commit transaction ID!"
+Public Const ERROR_3 = "Comment must be at least 16 characters!"
+Public Const ERROR_4 = "Comment cannot be longer than 1024 characters!"
+Public Const ERROR_5 = "Comment must start with activity ID!"
+Public Const ERROR_6 = "Comment doesn't start with a correct and unresolved activity ID or couldn't connect to ClearQuest!"
+'Public Const ERROR_7 = "Activity ID provided must be assigned to you!"
+
+Public wshShell
+Private retVal
+Private strRepoPath
+Private strRevision
+Private strComment
+Private strAuthor
+Private colArgs
+Private cqSession
+Private dbDesc
+Private userGroups
+Private activityId
+
+Dim FORBIDDEN_STATES
+ReDim FORBIDDEN_STATES(1)
+FORBIDDEN_STATES(0) = "Closed" 
+
+Dim  cqSessionObj 
+Dim  queryObj 
+Dim  filterObj 
+Dim  resultSetObj 
+	
+Set wshShell = WScript.CreateObject("WScript.Shell")
+Set colArgs = WScript.Arguments
+
+If (colArgs.Count < 2) Then
+	WScript.StdErr.WriteLine()
+    WScript.StdErr.WriteLine(ERROR_2)
+    Set colArgs = Nothing
+    Set wshShell = Nothing
+    WScript.Quit(2)
+End If
+
+strRepoPath = colArgs(0)
+strRevision = colArgs(1)
+Set colArgs = Nothing
+
+retVal = doMain(strRepoPath, strRevision)
+WScript.Quit(retVal)
+
+Function doMain(strPath, strRev)
+
+    strComment = runCMD(SVNLOOK_PATH & " log " & strPath & " --transaction " & strRev)
+    strAuthor = runCMD(SVNLOOK_PATH & " author " & strPath & " --transaction " & strRev)
+
+	'minimum comment length
+	If (Len(strComment) < 16) Then
+		doMain = 3
+		WScript.StdErr.WriteLine()
+		WScript.StdErr.WriteLine(ERROR_3)
+		Exit Function
+	End If
+	
+	'maximum comment length
+	If (Len(strComment) > 1024) Then
+		doMain = 4
+		WScript.StdErr.WriteLine()
+		WScript.StdErr.WriteLine(ERROR_4)
+		Exit Function
+	End If	
+	
+	'comment starts with DB_NAME (project name)
+	If (Left(strComment, 5) <> CQ_DB_NAME) Then
+		doMain = 5
+		WScript.StdErr.WriteLine()
+		WScript.StdErr.WriteLine(ERROR_5)
+		Exit Function
+	End If
+
+	'Connect  via  OLE  to  Rational  ClearQuest
+	Set  cqSession  =  CreateObject("CLEARQUEST.SESSION") 
+
+	'login_name,  password,  and  dbname  are  Strings  that  have been  set  elsewhere
+	cqSession.UserLogon  CQ_USER_NAME, CQ_USER_PASS, CQ_DB_NAME, AD_PRIVATE_SESSION, CQ_DB_SET_NAME
+
+	Set  dbDesc  =  cqSession.GetSessionDatabase 
+	'StdOut  "DB  name  =  "  &  dbDesc.GetDatabaseName 
+	'StdOut  "DB  set  name  =  "  &  dbDesc.GetDatabaseSetName 
+	
+	strComment = Trim (strComment)
+	
+	Dim arr
+	arr=Split(strComment, ":")
+	activityId = Trim(arr(0))
+	WScript.StdOut.WriteLine("activity id: " & activityId)
+	
+	'StdOut  "user  login  name  =  "  &  cqSession.GetUserLoginName 
+	'StdOut  "user  full  name  =  "  &  cqSession.GetUserFullName 
+	'StdOut  "user  email  =  "  &  cqSession.GetUserEmail 
+	
+	Set  cqSessionObj  =  cqSession
+	
+	'start  building  a  query  of  the  users 
+	Set  queryObj  =  cqSessionObj.BuildQuery(CQ_ISSUE_TYPE) 
+	'Set  queryObj  =  cqSessionObj.BuildQuery("users") 
+	
+	'have  the  query  return  the  desired  field  of  the  user  object(s) 
+	queryObj.BuildField("id") 
+	
+	Set  filterObj  =  queryObj.BuildFilterOperator(AD_BOOL_OP_AND) 
+	filterObj.BuildFilter  "id",  AD_COMP_OP_EQ,  activityId 
+	filterObj.BuildFilter  "State",  AD_COMP_OP_NOT_IN, FORBIDDEN_STATES 
+	'filterObj.BuildFilter  "Owner", AD_COMP_OP_EQ,  users 
+	Set  resultSetObj  =  cqSessionObj.BuildResultSet(queryObj) 
+	resultSetObj.EnableRecordCount
+
+	'run  it 
+	resultSetObj.Execute
+	
+	If (resultSetObj.RecordCount <> 1) Then
+		doMain = 6
+		WScript.StdErr.WriteLine()
+		WScript.StdErr.WriteLine(ERROR_6)
+        Exit Function
+	End If
+	 
+End Function
+
+Function  StdOut(Msg) 
+	msgbox  Msg 
+end  Function  
+
+Function runCMD(strRunCmd)
+    Dim strOut
+    Dim objExec
+
+    wshShell.LogEvent 4, "Running Command : " & strRunCmd
+    Set objExec = wshShell.Exec(strRunCmd)
+
+    Do While objExec.Status = 0
+        WScript.Sleep 100
+    Loop
+
+    strOut = objExec.StdOut.ReadAll()
+    Set objExec = Nothing
+    wshShell.LogEvent 4, "Output of run command : " & strOut
+    strOut = Trim(strOut)
+    If (Len(strOut) = 0) Then
+        runCMD = Empty
+    Else
+        runCMD = strOut
+    End If
+End Function	
+</script>
+</job>
+</package>
